@@ -7,19 +7,22 @@
 // error "Failed to sign request ... status code 403").
 
 const express = require('express');
-// FIX: import dari "/legacy" subpath, bukan root package.
-// Di tiktok-live-connector v2.x, root package (dist/index.js) itu ES Module murni
-// -> require() langsung bakal crash (ERR_REQUIRE_ESM).
-// "/legacy" tetap CommonJS DAN tetap ngeluarin event dalam bentuk lama
-// (data.uniqueId, data.comment, dst) - jadi semua handler di bawah ini
-// TIDAK perlu diubah sama sekali.
-const { WebcastPushConnection } = require('tiktok-live-connector/legacy');
 
 const app = express();
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 const MAX_BUFFER = 300; // simpen 300 event terakhir aja biar nggak makan memory
+
+// FIX: tiktok-live-connector@2.x itu PURE ESM - baik root package maupun
+// "/legacy" subpath, keduanya "type": "module", GAK ADA build CommonJS sama
+// sekali. Jadi require() apapun pathnya gak akan pernah jalan.
+// Satu-satunya cara load dari file CommonJS (file ini) adalah dynamic import().
+// Tapi dynamic import cuma bisa dipakai di dalam async function (top-level
+// await gak didukung di CommonJS) - makanya di-load sekali di start(), sebelum
+// app.listen(), dan disimpen ke variable module-level ini biar semua handler
+// di bawah tetep bisa akses classnya.
+let WebcastPushConnection;
 
 // ---- State global ----
 let tiktokConnection = null;
@@ -171,14 +174,24 @@ app.get('/', (req, res) => {
   res.json({ ok: true, service: 'tiktok-chat-relay', connected, username: currentUsername });
 });
 
-app.listen(PORT, () => {
-  console.log(`tiktok-chat-relay jalan di port ${PORT}`);
+async function start() {
+  // Load package ESM-only ini sekali sebelum server nerima request apapun.
+  ({ WebcastPushConnection } = await import('tiktok-live-connector/legacy'));
 
-  // Kalau username udah di-set lewat env var, langsung auto-connect pas boot
-  if (process.env.TIKTOK_USERNAME) {
-    connectToUsername(process.env.TIKTOK_USERNAME).catch((err) => {
-      lastError = err.message || String(err);
-      console.error('Gagal auto-connect:', lastError);
-    });
-  }
+  app.listen(PORT, () => {
+    console.log(`tiktok-chat-relay jalan di port ${PORT}`);
+
+    // Kalau username udah di-set lewat env var, langsung auto-connect pas boot
+    if (process.env.TIKTOK_USERNAME) {
+      connectToUsername(process.env.TIKTOK_USERNAME).catch((err) => {
+        lastError = err.message || String(err);
+        console.error('Gagal auto-connect:', lastError);
+      });
+    }
+  });
+}
+
+start().catch((err) => {
+  console.error('Gagal start server:', err);
+  process.exit(1);
 });

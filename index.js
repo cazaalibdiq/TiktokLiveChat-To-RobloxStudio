@@ -52,6 +52,18 @@ function cleanErrorMessage(msg) {
     .replace(/euler/gi, 'sign provider');
 }
 
+// "Failed to retrieve Room ID from all sources" itu pesan generic yang
+// nyembunyiin alasan asli tiap metode yang dicoba (HTML scrape, TikTok API,
+// sign provider). Detail per-sumbernya disimpen di err.config.requestErrs.
+function describeError(err) {
+  const base = err && err.message ? err.message : String(err);
+  const subErrors = err && err.config && Array.isArray(err.config.requestErrs)
+    ? err.config.requestErrs.map((e) => (e && e.message) ? e.message : String(e))
+    : [];
+  const full = subErrors.length ? `${base} -> ${subErrors.join(' | ')}` : base;
+  return cleanErrorMessage(full);
+}
+
 async function connectToUsername(username) {
   detachConnection();
   currentUsername = username;
@@ -131,7 +143,7 @@ app.post('/config', async (req, res) => {
     res.json({ ok: true, connected: true, username: currentUsername, roomId: state.roomId });
   } catch (err) {
     connected = false;
-    lastError = cleanErrorMessage(err.message || String(err));
+    lastError = describeError(err);
     res.status(502).json({ ok: false, error: lastError });
   }
 });
@@ -177,7 +189,7 @@ async function start() {
 
     if (process.env.TIKTOK_USERNAME) {
       connectToUsername(process.env.TIKTOK_USERNAME).catch((err) => {
-        lastError = cleanErrorMessage(err.message || String(err));
+        lastError = describeError(err);
         console.error('Gagal auto-connect:', lastError);
       });
     }

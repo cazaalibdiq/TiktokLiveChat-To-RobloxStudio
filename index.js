@@ -7,7 +7,13 @@
 // error "Failed to sign request ... status code 403").
 
 const express = require('express');
-const { WebcastPushConnection } = require('tiktok-live-connector');
+// FIX: import dari "/legacy" subpath, bukan root package.
+// Di tiktok-live-connector v2.x, root package (dist/index.js) itu ES Module murni
+// -> require() langsung bakal crash (ERR_REQUIRE_ESM).
+// "/legacy" tetap CommonJS DAN tetap ngeluarin event dalam bentuk lama
+// (data.uniqueId, data.comment, dst) - jadi semua handler di bawah ini
+// TIDAK perlu diubah sama sekali.
+const { WebcastPushConnection } = require('tiktok-live-connector/legacy');
 
 const app = express();
 app.use(express.json());

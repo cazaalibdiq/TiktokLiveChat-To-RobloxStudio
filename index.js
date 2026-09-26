@@ -1,8 +1,19 @@
 // tiktok-chat-relay
 // Relay server: TikTok LIVE -> HTTP polling endpoint buat Roblox Studio plugin.
+//
+// Connect langsung ke WebSocket managed tik.tools (wss://api.tik.tools),
+// BUKAN lewat library `tiktok-live-connector`. Alasannya: tiktok-live-connector
+// (lewat dependency tiktok-live-api-sdk) selalu manggil endpoint
+// GET /webcast/rooms/{roomId}/connect ke sign provider manapun yang di-set -
+// endpoint itu eksklusif Euler Stream dan TIDAK diimplementasikan tik.tools
+// (cek tabel endpoint resmi mereka: https://tik.tools/docs), makanya selalu 404.
+// tik.tools sendiri expose WebSocket terkelola yang sudah ngasih event JSON
+// langsung (chat/gift/like/member/roomInfo), jadi gak butuh sign library sama
+// sekali. Lihat: https://tik.tools/docs (Quick Start - WebSocket API).
 
 const express = require('express');
 const cors = require('cors');
+const WebSocket = require('ws');
 
 const app = express();
 app.use(cors());
@@ -11,9 +22,15 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 const MAX_BUFFER = 300;
 
-let WebcastPushConnection;
+// Host WebSocket tik.tools. Override lewat env kalau tik.tools ganti domain.
+const TIKTOOL_WS_HOST = process.env.TIKTOOL_WS_HOST || 'wss://api.tik.tools';
+// API key tik.tools. 'your_api_key' = demo key publik (limit ketat: 1 WS,
+// sesi 10 menit). Ganti dengan API key asli dari https://tik.tools/login.
+const TIKTOOL_API_KEY = process.env.SIGN_PROVIDER_API_KEY || 'your_api_key';
+// Berapa lama nunggu event 'connected'/'roomInfo' pertama sebelum dianggap gagal.
+const CONNECT_TIMEOUT_MS = 15000;
 
-let tiktokConnection = null;
+let ws = null;
 let currentUsername = null;
 let connected = false;
 let lastError = null;
@@ -31,109 +48,171 @@ function pushEvent(evt) {
   }
 }
 
+function cleanErrorMessage(msg) {
+  if (!msg) return 'Unknown error';
+  return String(msg);
+}
+
 function detachConnection() {
-  if (tiktokConnection) {
+  if (ws) {
     try {
-      tiktokConnection.disconnect();
+      ws.removeAllListeners();
+      ws.terminate();
     } catch (_) {}
-    tiktokConnection.removeAllListeners();
-    tiktokConnection = null;
+    ws = null;
   }
   connected = false;
   roomId = null;
 }
 
-function cleanErrorMessage(msg) {
-  if (!msg) return msg;
-  return String(msg)
-    .replace(/\[[a-zA-Z]*Euler[a-zA-Z]*\]\s*/gi, '')
-    .replace(/euler\s*stream/gi, 'sign provider')
-    .replace(/eulerstream/gi, 'sign provider')
-    .replace(/euler/gi, 'sign provider');
+function buildWsUrl(username) {
+  const params = new URLSearchParams({
+    uniqueId: username,
+    apiKey: TIKTOOL_API_KEY,
+  });
+  return `${TIKTOOL_WS_HOST}?${params.toString()}`;
 }
 
-// "Failed to retrieve Room ID from all sources" itu pesan generic yang
-// nyembunyiin alasan asli tiap metode yang dicoba (HTML scrape, TikTok API,
-// sign provider). Detail per-sumbernya disimpen di err.config.requestErrs.
-function describeError(err) {
-  const base = err && err.message ? err.message : String(err);
-  const subErrors = err && err.config && Array.isArray(err.config.requestErrs)
-    ? err.config.requestErrs.map((e) => (e && e.message) ? e.message : String(e))
-    : [];
-  const full = subErrors.length ? `${base} -> ${subErrors.join(' | ')}` : base;
-  return cleanErrorMessage(full);
-}
-
-async function connectToUsername(username) {
+function connectToUsername(username) {
   detachConnection();
   currentUsername = username;
   lastError = null;
 
-  // enableExtendedGiftInfo dimatiin: fitur ini bikin library nembak endpoint
-  // sign generic (bukan /webcast/*) yang gak didukung tik.tools. giftName &
-  // giftCount di bawah udah ada di event gift standar, gak butuh ini.
-  tiktokConnection = new WebcastPushConnection(username, {
-    enableExtendedGiftInfo: false,
-  });
+  return new Promise((resolve, reject) => {
+    const socket = new WebSocket(buildWsUrl(username));
+    ws = socket;
 
-  tiktokConnection.on('chat', (data) => {
-    pushEvent({
-      type: 'chat',
-      username: data.uniqueId,
-      text: data.comment,
-      giftName: null,
-      giftCount: null,
-      likeCount: null,
+    let settled = false;
+    const settleTimeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      detachConnection();
+      reject(new Error('Timeout menunggu balasan dari tik.tools (cek API key / username live atau tidak)'));
+    }, CONNECT_TIMEOUT_MS);
+
+    function settleOk() {
+      if (settled) return;
+      settled = true;
+      clearTimeout(settleTimeout);
+      connected = true;
+      resolve({ roomId });
+    }
+
+    function settleFail(err) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(settleTimeout);
+      detachConnection();
+      reject(err instanceof Error ? err : new Error(cleanErrorMessage(err)));
+    }
+
+    socket.on('message', (raw) => {
+      let msg;
+      try {
+        msg = JSON.parse(raw.toString());
+      } catch (_) {
+        return;
+      }
+
+      const evt = msg.event;
+      const data = msg.data || {};
+
+      switch (evt) {
+        case 'connected':
+        case 'roomInfo':
+          if (data.roomId) roomId = data.roomId;
+          settleOk();
+          return;
+
+        case 'chat':
+          pushEvent({
+            type: 'chat',
+            username: data.user?.uniqueId || null,
+            text: data.comment ?? null,
+            giftName: null,
+            giftCount: null,
+            likeCount: null,
+          });
+          return;
+
+        case 'gift':
+          // giftType 1 = gift yang bisa "streak" (combo). Cuma catat pas
+          // streak-nya selesai (repeatEnd) biar gak dobel-dobel per combo.
+          if (data.giftType === 1 && !data.repeatEnd) return;
+          pushEvent({
+            type: 'gift',
+            username: data.user?.uniqueId || null,
+            text: null,
+            giftName: data.giftName ?? null,
+            giftCount: data.repeatCount || 1,
+            likeCount: null,
+          });
+          return;
+
+        case 'like':
+          pushEvent({
+            type: 'like',
+            username: data.user?.uniqueId || null,
+            text: null,
+            giftName: null,
+            giftCount: null,
+            likeCount: data.likeCount ?? null,
+          });
+          return;
+
+        case 'member':
+          pushEvent({
+            type: 'member',
+            username: data.user?.uniqueId || null,
+            text: 'joined',
+            giftName: null,
+            giftCount: null,
+            likeCount: null,
+          });
+          return;
+
+        case 'disconnected':
+          connected = false;
+          lastError = 'Stream berakhir';
+          return;
+
+        case 'error': {
+          const errMsg = cleanErrorMessage(data.message || data.error || 'tik.tools mengembalikan error');
+          if (!settled) {
+            settleFail(new Error(errMsg));
+          } else {
+            connected = false;
+            lastError = errMsg;
+          }
+          return;
+        }
+
+        default:
+          // event lain (battle, social, dst) sengaja diabaikan buat relay ini.
+          return;
+      }
+    });
+
+    socket.on('close', (code, reasonBuf) => {
+      const reason = reasonBuf ? reasonBuf.toString() : '';
+      const detail = `code ${code}${reason ? `: ${reason}` : ''}`;
+      if (!settled) {
+        settleFail(new Error(`Koneksi ke tik.tools ditutup sebelum connect (${detail})`));
+      } else {
+        connected = false;
+        lastError = `Koneksi terputus (${detail})`;
+      }
+    });
+
+    socket.on('error', (err) => {
+      if (!settled) {
+        settleFail(err);
+      } else {
+        connected = false;
+        lastError = cleanErrorMessage(err.message);
+      }
     });
   });
-
-  tiktokConnection.on('gift', (data) => {
-    if (data.giftType === 1 && !data.repeatEnd) return;
-    pushEvent({
-      type: 'gift',
-      username: data.uniqueId,
-      text: null,
-      giftName: data.giftName,
-      giftCount: data.repeatCount || 1,
-      likeCount: null,
-    });
-  });
-
-  tiktokConnection.on('like', (data) => {
-    pushEvent({
-      type: 'like',
-      username: data.uniqueId,
-      text: null,
-      giftName: null,
-      giftCount: null,
-      likeCount: data.likeCount,
-    });
-  });
-
-  tiktokConnection.on('member', (data) => {
-    pushEvent({
-      type: 'member',
-      username: data.uniqueId,
-      text: 'joined',
-      giftName: null,
-      giftCount: null,
-      likeCount: null,
-    });
-  });
-
-  tiktokConnection.on('streamEnd', () => {
-    connected = false;
-    lastError = 'Stream berakhir';
-  });
-
-  tiktokConnection.on('disconnected', () => {
-    connected = false;
-  });
-
-  const state = await tiktokConnection.connect();
-  connected = true;
-  roomId = state.roomId;
-  return state;
 }
 
 app.post('/config', async (req, res) => {
@@ -146,7 +225,7 @@ app.post('/config', async (req, res) => {
     res.json({ ok: true, connected: true, username: currentUsername, roomId: state.roomId });
   } catch (err) {
     connected = false;
-    lastError = describeError(err);
+    lastError = cleanErrorMessage(err.message);
     res.status(502).json({ ok: false, error: lastError });
   }
 });
@@ -175,31 +254,20 @@ app.get('/', (req, res) => {
   res.json({ ok: true, service: 'tiktok-chat-relay', connected, username: currentUsername });
 });
 
-async function start() {
-  const legacyModule = await import('tiktok-live-connector/legacy');
-  const mainModule = await import('tiktok-live-connector');
-  WebcastPushConnection = legacyModule.WebcastPushConnection;
-  const { SignConfig } = mainModule;
-
-  SignConfig.basePath = process.env.SIGN_PROVIDER_HOST || 'https://api.tik.tools';
-  SignConfig.apiKey = process.env.SIGN_PROVIDER_API_KEY || 'your_api_key';
-
-  console.log(`[sign-config] basePath = ${SignConfig.basePath}`);
-  console.log(`[sign-config] apiKey   = ${process.env.SIGN_PROVIDER_API_KEY ? 'set (' + SignConfig.apiKey.length + ' chars)' : 'not set, using demo key'}`);
+function start() {
+  console.log(`[sign-config] wsHost = ${TIKTOOL_WS_HOST}`);
+  console.log(`[sign-config] apiKey = ${process.env.SIGN_PROVIDER_API_KEY ? 'set (' + TIKTOOL_API_KEY.length + ' chars)' : 'not set, using demo key (limit ketat!)'}`);
 
   app.listen(PORT, () => {
     console.log(`tiktok-chat-relay jalan di port ${PORT}`);
 
     if (process.env.TIKTOK_USERNAME) {
       connectToUsername(process.env.TIKTOK_USERNAME).catch((err) => {
-        lastError = describeError(err);
+        lastError = cleanErrorMessage(err.message);
         console.error('Gagal auto-connect:', lastError);
       });
     }
   });
 }
 
-start().catch((err) => {
-  console.error('Gagal start server:', err);
-  process.exit(1);
-});
+start();

@@ -1,6 +1,10 @@
 // tiktok-chat-relay
 // Relay server: TikTok LIVE -> HTTP polling endpoint buat Roblox Studio plugin.
-// Nggak butuh kartu kredit / API key TikTok, cukup username yang lagi live.
+// Nggak butuh login/kredensial TikTok, cukup username yang lagi live.
+// Tapi BUTUH EulerStream Sign API key (gratis, https://www.eulerstream.com) diisi
+// ke env var EULER_SIGN_API_KEY di Railway, biar gak numpang di sign-server
+// free-tier bareng semua pengguna tiktok-live-connector sedunia (itu penyebab
+// error "Failed to sign request ... status code 403").
 
 const express = require('express');
 const { WebcastPushConnection } = require('tiktok-live-connector');
@@ -51,6 +55,9 @@ async function connectToUsername(username) {
 
   tiktokConnection = new WebcastPushConnection(username, {
     enableExtendedGiftInfo: true,
+    // Sign API key dari eulerstream.com. Tanpa ini, request ditandatangani lewat
+    // sign-server gratisan yang dipakai bareng-bareng dan gampang kena rate-limit/403.
+    signApiKey: process.env.EULER_SIGN_API_KEY,
   });
 
   tiktokConnection.on('chat', (data) => {

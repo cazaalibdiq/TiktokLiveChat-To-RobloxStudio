@@ -69,8 +69,11 @@ async function connectToUsername(username) {
   currentUsername = username;
   lastError = null;
 
+  // enableExtendedGiftInfo dimatiin: fitur ini bikin library nembak endpoint
+  // sign generic (bukan /webcast/*) yang gak didukung tik.tools. giftName &
+  // giftCount di bawah udah ada di event gift standar, gak butuh ini.
   tiktokConnection = new WebcastPushConnection(username, {
-    enableExtendedGiftInfo: true,
+    enableExtendedGiftInfo: false,
   });
 
   tiktokConnection.on('chat', (data) => {

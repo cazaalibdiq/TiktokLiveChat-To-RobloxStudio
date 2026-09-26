@@ -23,6 +23,8 @@ const MAX_BUFFER = 300; // simpen 300 event terakhir aja biar nggak makan memory
 // app.listen(), dan disimpen ke variable module-level ini biar semua handler
 // di bawah tetep bisa akses classnya.
 let WebcastPushConnection;
+let SignConfig;
+
 
 // ---- State global ----
 let tiktokConnection = null;
@@ -57,6 +59,19 @@ function detachConnection() {
   roomId = null;
 }
 
+// Override sign-provider global (SignConfig) kalau SIGN_PROVIDER_HOST diisi.
+// Dipanggil tiap sebelum connect (bukan cuma sekali di boot) karena constructor
+// WebcastPushConnection sendiri nulis ke SignConfig.apiKey tiap kali dibuat -
+// jadi ini mesti jalan PALING TERAKHIR biar gak ketiban balik ke default Euler.
+function applySignProviderOverride() {
+  if (process.env.SIGN_PROVIDER_HOST) {
+    SignConfig.basePath = process.env.SIGN_PROVIDER_HOST;
+  }
+  if (process.env.SIGN_PROVIDER_API_KEY) {
+    SignConfig.apiKey = process.env.SIGN_PROVIDER_API_KEY;
+  }
+}
+
 async function connectToUsername(username) {
   detachConnection();
   currentUsername = username;
@@ -64,18 +79,13 @@ async function connectToUsername(username) {
 
   tiktokConnection = new WebcastPushConnection(username, {
     enableExtendedGiftInfo: true,
-    // Sign API key dari eulerstream.com. Tanpa ini, request ditandatangani lewat
-    // sign-server gratisan yang dipakai bareng-bareng dan gampang kena rate-limit/403.
+    // Sign API key dari eulerstream.com. Cuma kepake kalau SIGN_PROVIDER_HOST
+    // di bawah gak diisi (lihat applySignProviderOverride).
     signApiKey: process.env.EULER_SIGN_API_KEY,
-    // Ganti sign-provider (kalau EulerStream minta paid plan). Isi SIGN_PROVIDER_HOST
-    // & SIGN_PROVIDER_API_KEY di Railway Variables buat pindah ke provider lain
-    // (misal https://api.tik.tools). Kalau kedua env var ini gak diisi, tetep pakai
-    // EulerStream default seperti sebelumnya.
-    ...(process.env.SIGN_PROVIDER_HOST && {
-      signProviderHost: process.env.SIGN_PROVIDER_HOST,
-      signProviderApiKey: process.env.SIGN_PROVIDER_API_KEY,
-    }),
   });
+
+  // Paksa ke provider custom (kalau ada) SETELAH constructor jalan, biar menang.
+  applySignProviderOverride();
 
   tiktokConnection.on('chat', (data) => {
     pushEvent({

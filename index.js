@@ -67,6 +67,14 @@ async function connectToUsername(username) {
     // Sign API key dari eulerstream.com. Tanpa ini, request ditandatangani lewat
     // sign-server gratisan yang dipakai bareng-bareng dan gampang kena rate-limit/403.
     signApiKey: process.env.EULER_SIGN_API_KEY,
+    // Ganti sign-provider (kalau EulerStream minta paid plan). Isi SIGN_PROVIDER_HOST
+    // & SIGN_PROVIDER_API_KEY di Railway Variables buat pindah ke provider lain
+    // (misal https://api.tik.tools). Kalau kedua env var ini gak diisi, tetep pakai
+    // EulerStream default seperti sebelumnya.
+    ...(process.env.SIGN_PROVIDER_HOST && {
+      signProviderHost: process.env.SIGN_PROVIDER_HOST,
+      signProviderApiKey: process.env.SIGN_PROVIDER_API_KEY,
+    }),
   });
 
   tiktokConnection.on('chat', (data) => {

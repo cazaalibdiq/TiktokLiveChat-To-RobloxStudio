@@ -195,6 +195,10 @@ app.get('/', (req, res) => {
 async function start() {
   // Load package ESM-only ini sekali sebelum server nerima request apapun.
   ({ WebcastPushConnection } = await import('tiktok-live-connector/legacy'));
+  // SignConfig cuma diexport dari root package (bukan /legacy), tapi dia satu
+  // instance global yang sama dipakai internal legacy wrapper - jadi override
+  // di sini kepake juga pas connect lewat WebcastPushConnection.
+  ({ SignConfig } = await import('tiktok-live-connector'));
 
   app.listen(PORT, () => {
     console.log(`tiktok-chat-relay jalan di port ${PORT}`);

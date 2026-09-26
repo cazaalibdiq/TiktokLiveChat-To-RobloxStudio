@@ -36,6 +36,14 @@ let connected = false;
 let lastError = null;
 let roomId = null;
 
+// Nomor "generasi" attempt koneksi. Tiap panggilan connectToUsername() dapet
+// nomor sendiri yang naik terus. Dipakai buat mastiin timer/callback dari
+// attempt LAMA (yang udah keburu digantikan attempt baru sebelum sempat
+// settle) gak bisa lagi nyentuh state global (ws/connected/eventBuffer) -
+// ini yang sebelumnya bikin koneksi ke akun lama "nyangkut" walau target
+// username udah diganti.
+let generation = 0;
+
 let eventBuffer = [];
 let nextId = 1;
 
@@ -77,6 +85,19 @@ function connectToUsername(username) {
   detachConnection();
   currentUsername = username;
   lastError = null;
+  // Buang event dari room sebelumnya - bukan punya target username yang baru.
+  // nextId SENGAJA gak direset, biar cursor `since` yang disimpan plugin
+  // Roblox tetap valid (naik terus) dan gak ada event baru yang keskip.
+  eventBuffer = [];
+
+  const myGeneration = ++generation;
+  function isCurrent() {
+    // false berarti attempt ini udah digantikan connectToUsername() lain
+    // yang dipanggil belakangan - attempt ini gak boleh lagi ubah state
+    // global apapun (ws/connected/roomId/eventBuffer), sekalipun event
+    // atau timernya baru fire belakangan.
+    return myGeneration === generation;
+  }
 
   return new Promise((resolve, reject) => {
     const socket = new WebSocket(buildWsUrl(username));
@@ -85,14 +106,14 @@ function connectToUsername(username) {
     let settled = false;
     let debugMsgCount = 0;
     const settleTimeout = setTimeout(() => {
-      if (settled) return;
+      if (settled || !isCurrent()) return;
       settled = true;
       detachConnection();
       reject(new Error('Timeout menunggu handshake WebSocket dari tik.tools (cek API key / firewall Railway)'));
     }, CONNECT_TIMEOUT_MS);
 
     function settleOk() {
-      if (settled) return;
+      if (settled || !isCurrent()) return;
       settled = true;
       clearTimeout(settleTimeout);
       connected = true;
@@ -100,7 +121,7 @@ function connectToUsername(username) {
     }
 
     function settleFail(err) {
-      if (settled) return;
+      if (settled || !isCurrent()) return;
       settled = true;
       clearTimeout(settleTimeout);
       detachConnection();
@@ -112,10 +133,12 @@ function connectToUsername(username) {
     // tik.tools kadang baru ngirim event pertama pas ada chat/gift beneran,
     // jadi nunggu pesan itu bikin timeout padahal koneksinya sebenarnya oke.
     socket.on('open', () => {
+      if (!isCurrent()) return;
       settleOk();
     });
 
     socket.on('message', (raw) => {
+      if (!isCurrent()) return;
       let msg;
       try {
         msg = JSON.parse(raw.toString());
@@ -210,6 +233,7 @@ function connectToUsername(username) {
     });
 
     socket.on('close', (code, reasonBuf) => {
+      if (!isCurrent()) return;
       const reason = reasonBuf ? reasonBuf.toString() : '';
       const detail = `code ${code}${reason ? `: ${reason}` : ''}`;
       if (!settled) {
@@ -221,6 +245,7 @@ function connectToUsername(username) {
     });
 
     socket.on('error', (err) => {
+      if (!isCurrent()) return;
       if (!settled) {
         settleFail(err);
       } else {

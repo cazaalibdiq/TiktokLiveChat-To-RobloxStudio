@@ -2,16 +2,19 @@
 // Relay server: TikTok LIVE -> HTTP polling endpoint buat Roblox Studio plugin.
 // Nggak butuh login/kredensial TikTok, cukup username yang lagi live.
 //
-// Sign provider (yang nandatanganin tiap koneksi ke TikTok) diatur lewat 2 env
-// var yang DIBACA LANGSUNG sama tiktok-live-connector pas library-nya di-load:
+// Sign provider diatur lewat 2 env var di Railway:
 //   SIGN_API_URL - base URL sign server (default: https://api.eulerstream.com)
 //   SIGN_API_KEY - API key buat sign server itu
-// Ganti ke provider lain (misal https://api.tik.tools) cukup ganti isi env var
-// ini di Railway, GAK PERLU ubah kode sama sekali.
+// FIX: sebelumnya cuma ngandelin tiktok-live-connector baca process.env pas
+// modul-nya di-import. Sekarang SignConfig di-assign EKSPLISIT di kode +
+// di-log pas boot, jadi kalau env var kebaca (atau kagak) langsung keliatan
+// di Railway logs, gak perlu nebak-nebak lagi provider mana yang aktif.
 
 const express = require('express');
+const cors = require('cors');
 
 const app = express();
+app.use(cors());
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
@@ -65,8 +68,8 @@ async function connectToUsername(username) {
   currentUsername = username;
   lastError = null;
 
-  // Sign provider diatur lewat env var SIGN_API_URL & SIGN_API_KEY (lihat
-  // komentar di atas) - gak perlu opsi apapun di sini.
+  // Sign provider udah di-set eksplisit sekali di start() (lihat di bawah) -
+  // gak perlu opsi apapun di sini, semua koneksi baru otomatis makein itu.
   tiktokConnection = new WebcastPushConnection(username, {
     enableExtendedGiftInfo: true,
   });
@@ -178,7 +181,22 @@ app.get('/', (req, res) => {
 
 async function start() {
   // Load package ESM-only ini sekali sebelum server nerima request apapun.
-  ({ WebcastPushConnection } = await import('tiktok-live-connector/legacy'));
+  // "legacy" subpath cuma export WebcastPushConnection - SignConfig ada di
+  // entry point utama, jadi di-import terpisah.
+  const legacyModule = await import('tiktok-live-connector/legacy');
+  const mainModule = await import('tiktok-live-connector');
+  WebcastPushConnection = legacyModule.WebcastPushConnection;
+  const { SignConfig } = mainModule;
+
+  // FIX UTAMA: assign eksplisit di kode, bukan cuma ngandelin
+  // tiktok-live-connector baca process.env pas modul di-load. Kalau
+  // SIGN_API_URL gak ke-set di Railway, ini fallback jelas ke eulerstream
+  // dan KELIATAN di log - gak nebak-nebak lagi provider mana yang aktif.
+  if (process.env.SIGN_API_URL) SignConfig.basePath = process.env.SIGN_API_URL;
+  if (process.env.SIGN_API_KEY) SignConfig.apiKey = process.env.SIGN_API_KEY;
+
+  console.log(`[sign-config] basePath = ${SignConfig.basePath}`);
+  console.log(`[sign-config] apiKey   = ${SignConfig.apiKey ? '(set, ' + SignConfig.apiKey.length + ' chars)' : '(KOSONG - bakal kena rate limit ketat / ditolak provider)'}`);
 
   app.listen(PORT, () => {
     console.log(`tiktok-chat-relay jalan di port ${PORT}`);

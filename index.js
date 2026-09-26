@@ -83,11 +83,12 @@ function connectToUsername(username) {
     ws = socket;
 
     let settled = false;
+    let debugMsgCount = 0;
     const settleTimeout = setTimeout(() => {
       if (settled) return;
       settled = true;
       detachConnection();
-      reject(new Error('Timeout menunggu balasan dari tik.tools (cek API key / username live atau tidak)'));
+      reject(new Error('Timeout menunggu handshake WebSocket dari tik.tools (cek API key / firewall Railway)'));
     }, CONNECT_TIMEOUT_MS);
 
     function settleOk() {
@@ -106,12 +107,27 @@ function connectToUsername(username) {
       reject(err instanceof Error ? err : new Error(cleanErrorMessage(err)));
     }
 
+    // Anggap "connect" berhasil begitu handshake WebSocket sukses (open),
+    // JANGAN nunggu pesan 'connected'/'roomInfo' spesifik dari server -
+    // tik.tools kadang baru ngirim event pertama pas ada chat/gift beneran,
+    // jadi nunggu pesan itu bikin timeout padahal koneksinya sebenarnya oke.
+    socket.on('open', () => {
+      settleOk();
+    });
+
     socket.on('message', (raw) => {
       let msg;
       try {
         msg = JSON.parse(raw.toString());
       } catch (_) {
         return;
+      }
+
+      // Log 5 pesan pertama ke console (keliatan di Railway logs) buat bantu
+      // debug format event asli dari tik.tools kalau masih ada yang aneh.
+      if (debugMsgCount < 5) {
+        debugMsgCount += 1;
+        console.log('[tiktool-msg]', JSON.stringify(msg).slice(0, 500));
       }
 
       const evt = msg.event;
